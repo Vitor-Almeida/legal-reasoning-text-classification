@@ -5,7 +5,10 @@ __pycache__/
 
 # big folders:
 data/
-models/
+modelos/
+wandb/
+
+secrets.env
 
 # C extensions
 *.so
