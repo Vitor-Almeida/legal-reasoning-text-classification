@@ -3,29 +3,30 @@
 from unsloth import FastLanguageModel, PatchFastRL
 from datasets import load_from_disk
 from unsloth import is_bfloat16_supported
+
+PatchFastRL("GRPO", FastLanguageModel)
+
 from trl import GRPOConfig, GRPOTrainer
 import legal_reasoning.utils as lru
 import legal_reasoning.definitions as lrd
 
-# Load and prep dataset
-
-#python -m torch.distributed.launch main.py
-
 def main():
 
-    
-    PatchFastRL("GRPO", FastLanguageModel)
+    model_name = "modelos/external/unsloth_Qwen2.5-3B-Instruct-bnb-4bit"
+    output_dir="modelos/local/unsloth_Qwen2.5-3B-Instruct-bnb-4bit"
+    run_name="unsloth_Qwen2.5-3B-Instruct-bnb-4bit-gsm8k"
 
-    max_seq_length = 512 # Can increase for longer reasoning traces
-    lora_rank = 32 # Larger rank = smarter, but slower
+    max_seq_length = 1024 # Can increase for longer reasoning traces
+    lora_rank = 64 # Larger rank = smarter, but slower
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name = "modelos/external/meta-llama_Llama-3.2-1B-Instruct",
+        #model_name = "Qwen/Qwen2.5-3B-Instruct",
+        model_name = model_name,
         max_seq_length = max_seq_length,
         load_in_4bit = True, # False for LoRA 16bit
         fast_inference = True, # Enable vLLM fast inference
         max_lora_rank = lora_rank,
-        gpu_memory_utilization = 0.9, # Reduce if out of memory
+        gpu_memory_utilization = 0.5, # Reduce if out of memory
     )
 
     model = FastLanguageModel.get_peft_model(
@@ -40,33 +41,35 @@ def main():
         random_state = 3407,
     )
 
-    dataset = lru.get_gsm8k_questions(load_from_disk("data/gsm8k"))
-    #utils.extract_xml_answer()
+    dataset = lru.get_gsm8k_questions(load_from_disk("data/gsm8k"),split="train")
+    dataset_test = lru.get_gsm8k_questions(load_from_disk("data/gsm8k"),split="test")
 
     training_args = GRPOConfig(
         use_vllm = True, # use vLLM for fast inference!
-        vllm_device="cuda:1",
+        run_name=run_name,
         learning_rate = 5e-6,
         adam_beta1 = 0.9,
         adam_beta2 = 0.99,
         weight_decay = 0.1,
         warmup_ratio = 0.1,
         lr_scheduler_type = "cosine",
-        optim = "paged_adamw_8bit",
+        optim = "adamw_8bit",
         logging_steps = 1,
         bf16 = is_bfloat16_supported(),
         fp16 = not is_bfloat16_supported(),
-        per_device_train_batch_size = 1,
+        per_device_train_batch_size = 4,
         gradient_accumulation_steps = 1, # Increase to 4 for smoother training
-        num_generations = 1, # Decrease if out of memory
+        num_generations = 8, # Decrease if out of memory
         max_prompt_length = 256,
         max_completion_length = 200,
-        # num_train_epochs = 1, # Set to 1 for a full training run
-        max_steps = 250,
+        num_train_epochs = 1, # Set to 1 for a full training run
+        #max_steps = 250,
         save_steps = 250,
+        eval_strategy ="steps",
+        eval_steps=100,
         max_grad_norm = 0.1,
-        report_to = "none", # Can use Weights & Biases
-        output_dir = "outputs",
+        report_to = "wandb", # Can use Weights & Biases
+        output_dir = output_dir,
     )
 
     trainer = GRPOTrainer(
@@ -77,17 +80,17 @@ def main():
             lru.soft_format_reward_func,
             lru.strict_format_reward_func,
             lru.int_reward_func,
-            lru.correctness_reward_func,
+            lru.correctness_reward_func
         ],
         args = training_args,
-        train_dataset = dataset,
+        train_dataset=dataset,
+        eval_dataset=dataset_test
     )
     trainer.train()
 
-    model.save_lora("models/local/grpo_saved_lora")
+    model.save_lora(training_args.output_dir)
 
     return None
-
 
 if __name__ == "__main__":
     main()

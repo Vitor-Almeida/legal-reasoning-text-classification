@@ -9,7 +9,8 @@ from vllm import LLM, SamplingParams
 dataset = lru.get_gsm8k_questions(load_from_disk("data/gsm8k"),split="train")
 dataset_test = lru.get_gsm8k_questions(load_from_disk("data/gsm8k"),split="test")
 
-llm = LLM(model="modelos/external/meta-llama_Llama-3.2-1B-Instruct")
+#llm = LLM(model="modelos/external/meta-llama_Llama-3.2-1B-Instruct")
+llm = LLM(model="modelos/local/meta-llama_Llama-3.2-1B-Instruct")
 
 sampling_params = SamplingParams(
     temperature = 0.8,

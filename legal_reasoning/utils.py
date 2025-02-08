@@ -10,17 +10,12 @@ def extract_xml_answer(text: str) -> str:
 def extract_hash_answer(text: str) -> str | None:
     if "####" not in text:
         return None
-    return text.split("####")[1].strip()
+    return text.split("####")[1].strip().replace(",", "").replace("$", "")
 
 def get_gsm8k_questions(data, split = "train") -> Dataset:
     data = data[split].map(lambda x: { # type: ignore
         'prompt': [
             {'role': 'system', 'content': lrd.SYSTEM_PROMPT},
-            #{'role': 'user', 'content': 'What is the largest single-digit prime number?'},
-            #{'role': 'assistant', 'content': XML_COT_FORMAT.format(
-            #    reasoning="9 is divisble by 3 and 8 is divisible by 2, but 7 is prime.",
-            #    answer="7"
-            #)},
             {'role': 'user', 'content': x['question']}
         ],
         'answer': extract_hash_answer(x['answer'])
@@ -43,14 +38,14 @@ def strict_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion has a specific format."""
     pattern = r"^<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>\n$"
     responses = [completion[0]["content"] for completion in completions]
-    matches = [re.match(pattern, r) for r in responses] 
+    matches = [re.match(pattern, r) for r in responses]
     return [0.5 if match else 0.0 for match in matches]
 
 def soft_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion has a specific format."""
     pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
     responses = [completion[0]["content"] for completion in completions]
-    matches = [re.match(pattern, r) for r in responses] 
+    matches = [re.match(pattern, r) for r in responses]
     return [0.5 if match else 0.0 for match in matches]
 
 def count_xml(text) -> float:

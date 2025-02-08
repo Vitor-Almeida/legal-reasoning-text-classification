@@ -2,7 +2,7 @@ from torch import Tensor
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from trl.trainer.grpo_trainer import (nn, PreTrainedModel, broadcast_object_list, GRPOConfig, PeftConfig, Trainer, defaultdict, AutoModelForCausalLM, SamplingParams, Sampler, is_wandb_available, AutoModelForSequenceClassification, is_deepspeed_zero3_enabled, RewardFunc, os, textwrap, gather_object, torch, transformers, GenerationConfig, PreTrainedTokenizerBase, Any, version, warnings, get_comet_experiment_url, SyncRefModelCallback, apply_chat_template, RepeatRandomSampler, is_compiled_module, prepare_deepspeed, gather, TrainerCallback, LLM, generate_model_card, AutoTokenizer, is_conversational, create_reference_model, Dataset, Union, IterableDataset, maybe_apply_chat_template, Optional, pad, unwrap_model_for_generation)
+from trl.trainer.grpo_trainer import (AutoTokenizer, wandb, is_wandb_available, generate_model_card, maybe_apply_chat_template, GenerationConfig, gather_object, unwrap_model_for_generation, textwrap, Dataset, TrainerCallback, warnings, RewardFunc, prepare_deepspeed, Union, apply_chat_template, broadcast_object_list, Optional, defaultdict, PreTrainedModel, is_compiled_module, os, version, Any, IterableDataset, nn, create_reference_model, AutoModelForCausalLM, Trainer, torch, is_deepspeed_zero3_enabled, GRPOConfig, get_comet_experiment_url, LLM, SyncRefModelCallback, transformers, pad, is_conversational, AutoModelForSequenceClassification, PreTrainedTokenizerBase, SamplingParams, PeftConfig)
 
 class UnslothGRPOTrainer(Trainer):
     """
@@ -221,28 +221,9 @@ class UnslothGRPOTrainer(Trainer):
             optimizers=optimizers,
         )
     
-        # Check if the per_device_train/eval_batch_size * num processes can be divided by the number of generations
-        num_processes = self.accelerator.num_processes
-        global_batch_size = args.per_device_train_batch_size * num_processes
-        possible_values = [n_gen for n_gen in range(2, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
-        if self.num_generations not in possible_values:
-            raise ValueError(
-                f"The global train batch size ({num_processes} x {args.per_device_train_batch_size}) must be evenly "
-                f"divisible by the number of generations per prompt ({self.num_generations}). Given the current train "
-                f"batch size, the valid values for the number of generations are: {possible_values}."
-            )
-        if self.args.eval_strategy != "no":
-            global_batch_size = args.per_device_eval_batch_size * num_processes
-            possible_values = [n_gen for n_gen in range(2, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
-            if self.num_generations not in possible_values:
-                raise ValueError(
-                    f"The global eval batch size ({num_processes} x {args.per_device_eval_batch_size}) must be evenly "
-                    f"divisible by the number of generations per prompt ({self.num_generations}). Given the current "
-                    f"eval batch size, the valid values for the number of generations are: {possible_values}."
-                )
-    
         if self.use_vllm:
             self.llm = model.vllm_engine; self._last_loaded_step = 0; self.sampling_params = SamplingParams(
+                    n=self.num_generations,
                     temperature=args.temperature,
                     max_tokens=self.max_completion_length,
                 )
@@ -251,6 +232,7 @@ class UnslothGRPOTrainer(Trainer):
                 max_new_tokens=self.max_completion_length,
                 do_sample=True,
                 temperature=args.temperature,
+                num_return_sequences=self.num_generations,
                 pad_token_id=processing_class.pad_token_id,
             )
     
@@ -283,17 +265,12 @@ class UnslothGRPOTrainer(Trainer):
         if self._signature_columns is None:
             self._signature_columns = ["prompt"]
 
-    # We need a custom sampler that samples the same prompt multiple times
-    def _get_train_sampler(self) -> Sampler:
-        return RepeatRandomSampler(self.train_dataset, self.num_generations)
-
-    def _get_eval_sampler(self, eval_dataset) -> Sampler:
-        return RepeatRandomSampler(eval_dataset, self.num_generations)
-
     # Get the per-token log probabilities for the completions for the model and the reference model
     def _get_per_token_logps(self, model, input_ids, attention_mask, logits_to_keep):
         # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
-        logits = model(input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=logits_to_keep + 1).logits
+        logits = model(
+            input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=logits_to_keep + 1
+        ).logits  # (B, L, V)
         logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
 
         input_ids = input_ids[:, -logits_to_keep:]
@@ -303,7 +280,8 @@ class UnslothGRPOTrainer(Trainer):
 
         # Compute the log probabilities for the input tokens.
         token_logits = logits.gather(dim=-1, index=input_ids.unsqueeze(-1)).squeeze(-1)
-        logsumexp_values = torch.stack([torch.logsumexp(lg, dim=-1) for lg in logits])  # loop to reduce memory peak
+        # use a loop to reduce memory peak
+        logsumexp_values = torch.stack([torch.logsumexp(lg, dim=-1) for lg in logits])
         token_log_probs = token_logits - logsumexp_values  # log_softmax = logits - log(sum(exp(logits)))
         return token_log_probs
 
@@ -345,19 +323,22 @@ class UnslothGRPOTrainer(Trainer):
                 outputs = self.llm.generate(all_prompts_text, sampling_params=self.sampling_params, use_tqdm=False, lora_request = self.model.load_lora('grpo_trainer_lora_model', load_tensors = True))
                 completion_ids = [out.token_ids for completions in outputs for out in completions.outputs]
             else:
-                completion_ids = [None] * len(all_prompts_text)
+                completion_ids = [None] * len(all_prompts_text) * self.num_generations
+
             # Broadcast the completions from the main process to all processes, ensuring each process receives its
             # corresponding slice.
             completion_ids = broadcast_object_list(completion_ids, from_process=0)
             process_slice = slice(
-                self.accelerator.process_index * len(prompts),
-                (self.accelerator.process_index + 1) * len(prompts),
+                self.accelerator.process_index * len(prompts) * self.num_generations,
+                (self.accelerator.process_index + 1) * len(prompts) * self.num_generations,
             )
             completion_ids = completion_ids[process_slice]
 
             # Pad the completions, and concatenate them with the prompts
             completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
             completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
+            prompt_ids = torch.repeat_interleave(prompt_ids, self.num_generations, dim=0)
+            prompt_mask = torch.repeat_interleave(prompt_mask, self.num_generations, dim=0)
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         else:
             # Regular generation path
@@ -370,6 +351,7 @@ class UnslothGRPOTrainer(Trainer):
             prompt_length = prompt_ids.size(1)
             prompt_ids = prompt_completion_ids[:, :prompt_length]
             completion_ids = prompt_completion_ids[:, prompt_length:]
+            prompt_mask = prompt_mask.repeat_interleave(self.num_generations, dim=0)
 
         # Mask everything after the first EOS token
         is_eos = completion_ids == self.processing_class.eos_token_id
@@ -399,6 +381,9 @@ class UnslothGRPOTrainer(Trainer):
         if is_conversational(inputs[0]):
             completions = [[{"role": "assistant", "content": completion}] for completion in completions]
 
+        # Compute the rewards
+        prompts = [prompt for prompt in prompts for _ in range(self.num_generations)]  # repeat prompts
+
         rewards_per_func = torch.zeros(len(prompts), len(self.reward_funcs), device=device)
         for i, (reward_func, reward_processing_class) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes)
@@ -417,14 +402,13 @@ class UnslothGRPOTrainer(Trainer):
                     rewards_per_func[:, i] = reward_func(**reward_inputs).logits[:, 0]  # Shape (B*G,)
             else:
                 # Repeat all input columns (but "prompt" and "completion") to match the number of generations
-                keys = [key for key in inputs[0] if key not in ["prompt", "completion"]]
-                reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
+                reward_kwargs = {key: [] for key in inputs[0].keys() if key not in ["prompt", "completion"]}
+                for key in reward_kwargs:
+                    for example in inputs:
+                        # Repeat each value in the column for `num_generations` times
+                        reward_kwargs[key].extend([example[key]] * self.num_generations)
                 output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs)
                 rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
-
-        # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
-        # completions may be distributed across processes
-        rewards_per_func = gather(rewards_per_func)
 
         # Sum the rewards from all reward functions
         rewards = rewards_per_func.sum(dim=1)
@@ -438,15 +422,8 @@ class UnslothGRPOTrainer(Trainer):
         std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
         advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
 
-        # Slice to keep only the local part of the data
-        process_slice = slice(
-            self.accelerator.process_index * len(prompts),
-            (self.accelerator.process_index + 1) * len(prompts),
-        )
-        advantages = advantages[process_slice]
-
         # Log the metrics
-        reward_per_func = rewards_per_func.mean(0)
+        reward_per_func = self.accelerator.gather_for_metrics(rewards_per_func).mean(0)
         for i, reward_func in enumerate(self.reward_funcs):
             if isinstance(reward_func, nn.Module):  # Module instead of PretrainedModel for compat with compiled models
                 reward_func_name = reward_func.config._name_or_path.split("/")[-1]
@@ -454,8 +431,8 @@ class UnslothGRPOTrainer(Trainer):
                 reward_func_name = reward_func.__name__
             self._metrics[f"rewards/{reward_func_name}"].append(reward_per_func[i].item())
 
-        self._metrics["reward"].append(rewards.mean().item())
-        self._metrics["reward_std"].append(std_grouped_rewards.mean().item())
+        self._metrics["reward"].append(self.accelerator.gather_for_metrics(rewards).mean().item())
+        self._metrics["reward_std"].append(self.accelerator.gather_for_metrics(std_grouped_rewards).mean().item())
 
         return {
             "prompt_ids": prompt_ids,

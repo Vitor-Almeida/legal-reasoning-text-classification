@@ -13,10 +13,21 @@ import torch
 
 def main():
 
-    model_name = "modelos/external/meta-llama_Llama-3.2-1B-Instruct"
+    #model_name = "modelos/external/meta-llama_Llama-3.2-1B-Instruct"
+    #output_dir="modelos/local/meta-llama_Llama-3.2-1B-Instruct"
+    #run_name="meta-llama_Llama-3.2-1B-Instruct-gsm8k"
 
-    output_dir="modelos/local/meta-llama_Llama-3.2-1B-Instruct"
-    run_name="meta-llama_Llama-3.2-1B-Instruct-gsm8k"
+    #model_name = "modelos/external/meta-llama_Llama-3.2-3B-Instruct"
+    #output_dir="modelos/local/meta-llama_Llama-3.2-3B-Instruct"
+    #run_name="meta-llama_Llama-3.2-3B-Instruct-gsm8k"
+
+    #model_name = "modelos/external/Qwen_Qwen2.5-1.5B-Instruct"
+    #output_dir="modelos/local/Qwen_Qwen2.5-1.5B-Instruct"
+    #run_name="Qwen_Qwen2.5-1.5B-Instruct-gsm8k"
+
+    model_name = "modelos/external/Qwen_Qwen2.5-3B-Instruct"
+    output_dir="modelos/local/Qwen_Qwen2.5-3B-Instruct"
+    run_name="Qwen_Qwen2.5-3B-Instruct-gsm8k"
 
     dataset = lru.get_gsm8k_questions(load_from_disk("data/gsm8k"),split="train")
     dataset_test = lru.get_gsm8k_questions(load_from_disk("data/gsm8k"),split="test")
@@ -30,19 +41,25 @@ def main():
         weight_decay = 0.1,
         warmup_ratio = 0.1,
         lr_scheduler_type='cosine',
+        optim = "paged_adamw_8bit",
         logging_steps=1,
         bf16=True,
-        per_device_train_batch_size=8,
-        gradient_accumulation_steps=1,
-        num_generations=8,
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=8,
+        num_generations=2,
         max_prompt_length=256,
         max_completion_length=200,
         num_train_epochs=1,
+        #max_steps = 10,
         save_steps=100,
+        save_total_limit=3,
+        eval_strategy ="steps",
+        eval_steps=100,
         max_grad_norm=0.1,
         log_on_each_node=False,
         use_vllm=True,
-        vllm_gpu_memory_utilization=.6,
+        vllm_gpu_memory_utilization=.3,
+        vllm_max_model_len=8192,
         vllm_device="cuda:1",
         report_to="wandb" #I'm disabling Wandb.
     )
@@ -50,20 +67,20 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16,
-        device_map=None
+        device_map="cuda:0"
     ).to("cuda")
 
-    lora_config = LoraConfig(
-        task_type="CAUSAL_LM",
-        r=8,
-        lora_alpha=32,
-        lora_dropout=0.1,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj"],
-    )
+    #lora_config = LoraConfig(
+    #    task_type="CAUSAL_LM",
+    #    r=8,
+    #    lora_alpha=32,
+    #    lora_dropout=0.1,
+    #    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+    #        "gate_proj", "up_proj", "down_proj"],
+    #)
 
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
+    #model = get_peft_model(model, lora_config)
+    #model.print_trainable_parameters()
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
