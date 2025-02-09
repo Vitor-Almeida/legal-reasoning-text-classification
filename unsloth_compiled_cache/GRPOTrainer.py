@@ -2,7 +2,7 @@ from torch import Tensor
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from trl.trainer.grpo_trainer import (AutoTokenizer, wandb, is_wandb_available, generate_model_card, maybe_apply_chat_template, GenerationConfig, gather_object, unwrap_model_for_generation, textwrap, Dataset, TrainerCallback, warnings, RewardFunc, prepare_deepspeed, Union, apply_chat_template, broadcast_object_list, Optional, defaultdict, PreTrainedModel, is_compiled_module, os, version, Any, IterableDataset, nn, create_reference_model, AutoModelForCausalLM, Trainer, torch, is_deepspeed_zero3_enabled, GRPOConfig, get_comet_experiment_url, LLM, SyncRefModelCallback, transformers, pad, is_conversational, AutoModelForSequenceClassification, PreTrainedTokenizerBase, SamplingParams, PeftConfig)
+from trl.trainer.grpo_trainer import (AutoTokenizer, SamplingParams, Any, generate_model_card, Union, version, AutoModelForCausalLM, os, transformers, torch, Dataset, GenerationConfig, nn, is_deepspeed_zero3_enabled, broadcast_object_list, TrainerCallback, defaultdict, PreTrainedTokenizerBase, maybe_apply_chat_template, RewardFunc, create_reference_model, is_wandb_available, GRPOConfig, Optional, pad, AutoModelForSequenceClassification, unwrap_model_for_generation, apply_chat_template, Trainer, gather_object, prepare_deepspeed, SyncRefModelCallback, PreTrainedModel, PeftConfig, IterableDataset, warnings, is_conversational, wandb, textwrap, LLM, get_comet_experiment_url, is_compiled_module)
 
 class UnslothGRPOTrainer(Trainer):
     """
